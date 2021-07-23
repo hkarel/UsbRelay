@@ -75,6 +75,11 @@ signals:
 
 public slots:
     //bool toggle(const QVector<int> states);
+
+    // Активирует/деактивирует реле с номером relayNumber. Нумерация реле
+    // начинается с единицы.  Если relayNumber > RelayCount  переключение
+    // выполнено не будет. Если relayNumber <= 0  будут  переключены  все
+    // реле на плате
     bool toggle(int relayNumber, bool value);
 
 private:

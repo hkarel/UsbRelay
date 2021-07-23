@@ -533,6 +533,7 @@ bool Relay::toggleInternal(int relayNumber, bool value)
             cmd1 = 0xFC; // Выключить все реле
             expectState = 0;
         }
+        relayNumber = 0;
     }
     else
     {
