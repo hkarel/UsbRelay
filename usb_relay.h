@@ -30,8 +30,8 @@
 #include "shared/qt/qthreadex.h"
 
 #include <QtCore>
-#include <usb.h>
 #include <atomic>
+#include <libusb-1.0/libusb.h>
 
 namespace usb {
 
@@ -39,6 +39,7 @@ class Relay : public QThreadEx
 {
 public:
     bool init(const QVector<int>& states = {});
+    void deinit();
 
     // Наименование продукта
     QString product() const;
@@ -87,11 +88,11 @@ private:
     Relay() = default;
     DISABLE_DEFAULT_COPY(Relay)
 
+    bool claimDevice();
+    void releaseDevice(bool deviceDetached);
+
     void run() override;
     void threadStopEstablished() override;
-
-    bool captureDevice();
-    void releaseDevice();
 
     int readStates(char* buff, int buffSize);
 
@@ -104,10 +105,11 @@ private:
 
     QVector<int> _initStates;
 
-    usb_dev_handle*  _deviceHandle = {nullptr};
-    std::atomic_bool _deviceInitialized = {false};
-    std::atomic_int  _usbContinuousErrors = {0};
-    std::atomic_int  _usbLastErrorCode = {0};
+    libusb_context*       _context = {nullptr};
+    libusb_device_handle* _deviceHandle = {nullptr};
+    std::atomic_bool      _deviceInitialized = {false};
+    std::atomic_int       _usbContinuousErrors = {0};
+    std::atomic_int       _usbLastErrorCode = {0};
 
     QString _product;
     QString _serial;

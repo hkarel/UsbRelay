@@ -59,8 +59,20 @@ bool Relay::init(const QVector<int>& states)
     QMutexLocker locker {&_threadLock}; (void) locker;
 
     _initStates = states;
-    usb_init();
+    int res = libusb_init(&_context);
+    if (res != LIBUSB_SUCCESS)
+    {
+        log_error_m << "Failed libusb init"
+                    << ". Error code: " << res
+                    << ". Detail: " << libusb_error_name(res);
+        return false;
+    }
     return true;
+}
+
+void Relay::deinit()
+{
+    libusb_exit(_context);
 }
 
 QString Relay::product() const
@@ -105,13 +117,13 @@ bool Relay::setSerial(const QString& value)
     for (int i = 1; i <= serialLen; ++i)
         buff[i] = val[i - 1];
 
-    int res = usb_control_msg(_deviceHandle,
-                              USB_TYPE_CLASS | USB_RECIP_DEVICE | USB_ENDPOINT_OUT,
-                              USBRQ_HID_SET_REPORT,
-                              0, // value
-                              0, // index
-                              buff, buffSize,
-                              REPORT_REQUEST_TIMEOUT);
+    int res = libusb_control_transfer(_deviceHandle,
+                                LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_ENDPOINT_OUT,
+                                USBRQ_HID_SET_REPORT,
+                                0, // value
+                                0, // index
+                                (uchar*)buff, buffSize,
+                                REPORT_REQUEST_TIMEOUT);
     if (res != buffSize)
     {
         alog::Line logLine =
@@ -119,15 +131,15 @@ bool Relay::setSerial(const QString& value)
         if (res < 0)
         {
             _usbLastErrorCode = res;
-            logLine << ". Error code: " << res << "; " << usb_strerror();
+            logLine << ". Error code: " << res
+                    << ". Detail: " << libusb_error_name(res);
         }
         ++_usbContinuousErrors;
         return false;
     }
 
     memset(buff, 0, buffSize);
-    res = readStates(buff, buffSize);
-    if (res < 0)
+    if (readStates(buff, buffSize) < 0)
     {
         log_error_m << "Failed get USB relay serial";
         return false;
@@ -153,36 +165,273 @@ int Relay::count() const
     return _count;
 }
 
+bool Relay::claimDevice()
+{
+    int res;
+    bool deviceFound = false;
+
+    libusb_device** devList;
+    ssize_t devCount = libusb_get_device_list(0, &devList);
+
+    #define USB_DEV_CLOSE { \
+        libusb_close(_deviceHandle); \
+        _deviceHandle = nullptr; \
+        log_verbose_m << "USB device closed"; }
+
+    for (ssize_t i = 0; i < devCount; ++i)
+    {
+        CHECK_QTHREADEX_STOP
+
+        libusb_device* device = devList[i];
+        libusb_device_descriptor descript;
+        res = libusb_get_device_descriptor(device, &descript);
+        if (res != LIBUSB_SUCCESS)
+        {
+            log_error_m << "Failed get device descriptor"
+                        << ". Error code: " << res
+                        << ". Detail: " << libusb_error_name(res);
+            continue;
+        }
+
+        if (descript.idVendor == USB_RELAY_VENDOR_ID
+            && descript.idProduct == USB_RELAY_DEVICE_ID)
+        {
+            deviceFound = true;
+            _usbBusNumber = libusb_get_bus_number(device);
+            _usbDeviceNumber = libusb_get_device_address(device);
+
+            log_info_m << "USB pedal found on bus "
+                       << utl::formatMessage("%03d/%03d", _usbBusNumber, _usbDeviceNumber);
+
+            res = libusb_open(device, &_deviceHandle);
+            if (res != LIBUSB_SUCCESS)
+            {
+                log_error_m << "Failed open USB device"
+                            << ". Error code: " << res
+                            << ". Detail: " << libusb_error_name(res);
+
+                _deviceHandle = nullptr;
+                continue;
+            }
+            log_verbose_m << "USB device is open";
+
+            /** TODO Аналог num_children в linusb-1.0 не найден **
+            if (device->num_children != 0)
+            {
+                log_error_m << "Children not supported. USB interface will be closed";
+                USB_CLOSE;
+                continue;
+            } */
+
+            char buff[128];
+            res = libusb_get_string_descriptor_ascii(
+                                        _deviceHandle, descript.iManufacturer,
+                                        (uchar*)buff, sizeof(buff));
+            if (res < LIBUSB_SUCCESS)
+            {
+                log_error_m << "Failed get manufacturer description"
+                            << ". Error code: " << res
+                            << ". Detail: " << libusb_error_name(res);
+                USB_DEV_CLOSE;
+                continue;
+            }
+            log_verbose_m << "USB manufacturer: " << buff;
+
+            res = libusb_get_string_descriptor_ascii(
+                                        _deviceHandle, descript.iProduct,
+                                        (uchar*)buff, sizeof(buff));
+            if (res < LIBUSB_SUCCESS)
+            {
+                log_error_m << "Failed get product description"
+                            << ". Error code: " << res
+                            << ". Detail: " << libusb_error_name(res);
+                USB_DEV_CLOSE;
+                continue;
+            }
+            QString product = QString::fromLatin1(buff);
+            log_verbose_m << "USB product: " << product;
+
+            int len = strlen(baseProductName);
+            if (strncmp(buff, baseProductName, len) != 0)
+            {
+                log_error_m << log_format(
+                    "The base name of product must be %?"
+                    ". USB device will be closed", baseProductName);
+                USB_DEV_CLOSE;
+                continue;
+            }
+            if (strlen(buff) != size_t(len + 1))
+            {
+                log_error_m << log_format(
+                    "The base product name does not contain a product index"
+                    ". USB device will be closed", baseProductName);
+                USB_DEV_CLOSE;
+                continue;
+            }
+
+            int relayCount = int(buff[len]) - int('0');
+            QSet<int> countCheck {1, 2, 4, 8};
+            if (!countCheck.contains(relayCount))
+            {
+                log_error_m << log_format(
+                    "The number of relays must be one of values  [1, 2, 4, 8]"
+                    "Current value %?. USB device will be closed", relayCount);
+                USB_DEV_CLOSE;
+                continue;
+            }
+            log_verbose_m << "USB relay count: " << relayCount;
+
+            // Чтение состояний реле и серийного номера
+            int states = readStates(buff, 8);
+            if (states < 0)
+            {
+                USB_DEV_CLOSE;
+                continue;
+            }
+
+            const int serialLen = 5;
+            for (int i = 0; i < serialLen; ++i)
+            {
+                uchar ch = uchar(buff[i]);
+                if ((ch <= 0x20) || (ch >= 0x7F))
+                {
+                    log_error_m << log_format(
+                        "Incorrect USB relay serial. Symbol index: %?; code: %?",
+                        i, int(ch));
+                }
+            }
+            if (buff[serialLen + 1] != 0)
+            {
+                log_error_m << "Bad USB relay serial string";
+                USB_DEV_CLOSE;
+                continue;
+            }
+
+            libusb_config_descriptor* config;
+            res = libusb_get_active_config_descriptor(device, &config);
+            if (res != LIBUSB_SUCCESS)
+            {
+                log_error_m << "Failed libusb_get_active_config_descriptor"
+                            << ". Error code: " << res
+                            << ". Detail: " << libusb_error_name(res);
+                USB_DEV_CLOSE;
+                continue;
+            }
+
+            res = libusb_set_auto_detach_kernel_driver(_deviceHandle, 1);
+            if (res != LIBUSB_SUCCESS)
+            {
+                log_error_m << "Failed set auto_detach_kernel_driver flag"
+                            << ". Error code: " << res
+                            << ". Detail: " << libusb_error_name(res);
+                USB_DEV_CLOSE;
+                continue;
+            }
+
+            const int intfNumber = 0;
+            res = libusb_claim_interface(_deviceHandle, intfNumber);
+            if (res != LIBUSB_SUCCESS)
+            {
+                log_error_m << "Failed claim USB interface " << intfNumber
+                            << ". Error code: " << res
+                            << ". Detail: " << libusb_error_name(res)
+                            << ". Perhaps need to create a UDEV rule to access the device";
+                USB_DEV_CLOSE;
+                continue;
+            }
+            log_verbose_m << log_format("USB interface %? claimed", intfNumber);
+
+            QString serial = QString::fromLatin1(buff);
+            log_verbose_m << "USB relay serial: " << serial;
+
+            { //Block for QMutexLocker
+                QMutexLocker locker {&_threadLock}; (void) locker;
+                _product = product;
+                _serial = serial;
+                _states = quint8(states);
+                _count = relayCount;
+
+                QVariant vstat;
+                vstat.setValue(statesInternal());
+                log_verbose_m << "USB relay states: " << vstat;
+            }
+
+            libusb_free_device_list(devList, true);
+            return true;
+        }
+    }
+
+    #undef USB_DEV_CLOSE
+
+    /* Free the libusb device list freeing unused devices */
+    libusb_free_device_list(devList, true);
+
+    if (deviceFound)
+        log_debug_m << "Device failed initialize";
+    else
+        log_debug_m << "Device not found";
+
+    _deviceHandle = nullptr;
+    return false;
+}
+
+void Relay::releaseDevice(bool deviceDetached)
+{
+    if (_deviceHandle)
+    {
+        if (!deviceDetached)
+        {
+            const int intfNumber = 0;
+            int res = libusb_release_interface(_deviceHandle, intfNumber);
+            if (res != LIBUSB_SUCCESS)
+                log_error_m << "Failed release USB interface " << intfNumber
+                            << ". Error code: " << res
+                            << ". Detail: " << libusb_error_name(res);
+            else
+                log_verbose_m << log_format("USB interface %? released", intfNumber);
+        }
+        libusb_close(_deviceHandle);
+        log_verbose_m << "USB device closed";
+    }
+    _deviceHandle = nullptr;
+    _deviceInitialized = false;
+    _usbContinuousErrors = 0;
+    _usbLastErrorCode = 0;
+    _product.clear();
+    _serial.clear();
+    _count = 0;
+}
+
 void Relay::run()
 {
     log_info_m << "Started";
 
-    quint32 captureAttempts = 0;
+    quint32 claimAttempts = 0;
+    bool deviceDetached = false;
 
     while (true)
     {
-        CHECK_QTHREADEX_STOP
+        if (threadStop())
+            break;
 
         _deviceInitialized = false;
-        if (captureDevice())
-            _deviceInitialized = true;
-
-        if (!_deviceInitialized)
+        if (!claimDevice())
         {
-            releaseDevice();
+            releaseDevice(false);
             int timeout = 2;
-            if (captureAttempts > 40)
+            if (claimAttempts > 40)
                 timeout = 15;
-            else if (captureAttempts > 20)
+            else if (claimAttempts > 20)
                 timeout = 10;
-            ++captureAttempts;
+
             sleep(timeout);
+            claimAttempts++;
+            CHECK_QTHREADEX_STOP
             continue;
         }
-        captureAttempts = 0;
-
-        log_info_m << "USB relay emit signal 'attached'";
-        emit attached();
+        claimAttempts = 0;
+        deviceDetached = false;
+        _deviceInitialized = true;
 
         { //Block for QMutexLocker
             QMutexLocker locker(&_threadLock); (void) locker;
@@ -204,16 +453,24 @@ void Relay::run()
             }
         }
 
+        log_info_m << "USB relay emit signal 'attached'";
+        emit attached();
+
         while (true)
         {
             CHECK_QTHREADEX_STOP
 
             if (_usbContinuousErrors >= USB_CONTINUOUS_ERRORS_1
-                && _usbLastErrorCode == -19 /*Ошибка: 'Нет устройства'*/)
+                && _usbLastErrorCode == LIBUSB_ERROR_NO_DEVICE)
+            {
+                deviceDetached = true;
                 break;
-
+            }
             if (_usbContinuousErrors >= USB_CONTINUOUS_ERRORS_2)
+            {
+                deviceDetached = true;
                 break;
+            }
 
             { //Block for QMutexLocker
                 QMutexLocker locker(&_threadLock); (void) locker;
@@ -225,28 +482,28 @@ void Relay::run()
             { //Block for QMutexLocker
                 QMutexLocker locker {&_threadLock}; (void) locker;
                 char buff[8] = {0};
-                int res = readStates(buff, sizeof(buff));
-                if (res < 0)
+                int states = readStates(buff, sizeof(buff));
+                if (states < 0)
                     continue;
 
-                quint8 states = quint8(res);
-                if (_states != states)
+                if (_states != quint8(states))
                 {
                     log_debug_m << log_format(
                         "USB relay state was changed from outside"
-                        ". Old value: %?. New value: %?", int(_states), int(states));
-                    _states = states;
+                        ". Old value: %?. New value: %?", int(_states), states);
+                    _states = quint8(states);
                 }
             }
         } // while (true)
 
         log_info_m << "USB relay emit signal 'detached'";
         emit detached();
-        releaseDevice();
+
+        releaseDevice(deviceDetached);
 
     } // while (true)
 
-    releaseDevice();
+    releaseDevice(deviceDetached);
 
     log_info_m << "Stopped";
 }
@@ -257,192 +514,15 @@ void Relay::threadStopEstablished()
     _threadCond.wakeAll();
 }
 
-bool Relay::captureDevice()
-{
-    struct usb_bus* bus;
-    struct usb_device* device;
-
-    usb_find_busses();
-    usb_find_devices();
-
-    #define USB_CLOSE { \
-        usb_close(_deviceHandle); \
-        _deviceHandle = nullptr; \
-        log_verbose_m << "USB interface closed"; }
-
-    for (bus = usb_get_busses(); bus; bus = bus->next)
-    {
-        CHECK_QTHREADEX_STOP
-
-        for (device = bus->devices; device; device = device->next)
-        {
-            CHECK_QTHREADEX_STOP
-
-            if (device->descriptor.idVendor == USB_RELAY_VENDOR_ID
-                && device->descriptor.idProduct == USB_RELAY_DEVICE_ID)
-            {
-                sscanf(bus->dirname, "%d", &(_usbBusNumber));
-                _usbDeviceNumber = device->devnum;
-
-                log_info_m << "USB relay device found on bus "
-                           << utl::formatMessage("%03d/%03d", _usbBusNumber, _usbDeviceNumber);
-
-                int attempts = 1;
-                while (true)
-                {
-                    CHECK_QTHREADEX_STOP
-
-                    _deviceHandle = usb_open(device);
-                    if (_deviceHandle)
-                        break;
-
-                    log_error_m << "Failed open USB interface. Attempt: " << attempts;
-
-                    if (++attempts > 3)
-                        break;
-                    sleep(3);
-                }
-                if (threadStop())
-                    break;
-
-                if (!_deviceHandle)
-                    continue;
-
-                log_info_m << "USB interface is open";
-
-                if (device->num_children != 0 )
-                {
-                    log_error_m << "Children not supported. USB interface will be closed";
-                    USB_CLOSE;
-                    continue;
-                }
-
-                char buff[128];
-                int inum = device->descriptor.iManufacturer;
-                if (usb_get_string_simple(_deviceHandle, inum, buff, sizeof(buff)) > 0)
-                {
-                    log_verbose_m << "USB manufacturer: " << buff;
-                }
-                inum = device->descriptor.iProduct;
-                if (usb_get_string_simple(_deviceHandle, inum, buff, sizeof(buff)) <= 0)
-                {
-                    log_error_m << "Failed get product name"
-                                << ". Detail: " << usb_strerror()
-                                << ". USB interface will be closed";
-                    USB_CLOSE;
-                    continue;
-                }
-
-                QString product = QString::fromLatin1(buff);
-                log_verbose_m << "USB product: " << product;
-
-                int len = strlen(baseProductName);
-                if (strncmp(buff, baseProductName, len) != 0)
-                {
-                    log_error_m << log_format(
-                        "The base name of product must be %?"
-                        ". USB interface will be closed", baseProductName);
-                    USB_CLOSE;
-                    continue;
-                }
-                if (strlen(buff) != size_t(len + 1))
-                {
-                    log_error_m << log_format(
-                        "The base product name does not contain a product index"
-                        ". USB interface will be closed", baseProductName);
-                    USB_CLOSE;
-                    continue;
-                }
-
-                int relayCount = int(buff[len]) - int('0');
-                QSet<int> countCheck {1, 2, 4, 8};
-                if (!countCheck.contains(relayCount))
-                {
-                    log_error_m << log_format(
-                        "The number of relays must be one of values  [1, 2, 4, 8]"
-                        "Current value %?. USB interface will be closed", relayCount);
-                    USB_CLOSE;
-                    continue;
-                }
-                log_verbose_m << "USB relay count: " << relayCount;
-
-                int states = readStates(buff, 8);
-                if (states < 0)
-                {
-                    USB_CLOSE;
-                    continue;
-                }
-
-                const int serialLen = 5;
-                for (int i = 0; i < serialLen; ++i)
-                {
-                    uchar ch = uchar(buff[i]);
-                    if ((ch <= 0x20) || (ch >= 0x7F))
-                    {
-                        log_error_m << log_format(
-                            "Incorrect USB relay serial. Symbol index: %?; code: %?",
-                            i, int(ch));
-                    }
-                }
-                if (buff[serialLen + 1] != 0)
-                {
-                    log_error_m << "Bad USB relay serial string";
-                    USB_CLOSE;
-                    continue;
-                }
-
-                QString serial = QString::fromLatin1(buff);
-                log_verbose_m << "USB relay serial: " << serial;
-
-                { //Block for QMutexLocker
-                    QMutexLocker locker {&_threadLock}; (void) locker;
-                    _product = product;
-                    _serial = serial;
-                    _states = quint8(states);
-                    _count = relayCount;
-
-                    QVariant vstat;
-                    vstat.setValue(statesInternal());
-                    log_verbose_m << "USB relay states: " << vstat;
-                }
-                return true;
-            }
-        }
-    }
-
-    #undef USB_CLOSE
-
-    log_debug2_m << "Device not found";
-    _deviceHandle = nullptr;
-    return false;
-}
-
-void Relay::releaseDevice()
-{
-    if (_deviceHandle)
-    {
-        usb_close(_deviceHandle);
-        log_verbose_m << "USB interface closed";
-
-        _deviceHandle = nullptr;
-        _deviceInitialized = false;
-        _usbContinuousErrors = 0;
-        _usbLastErrorCode = 0;
-        _product.clear();
-        _serial.clear();
-        _count = 0;
-    }
-}
-
 int Relay::readStates(char* buff, int buffSize)
 {
-    int res = usb_control_msg(_deviceHandle,
-                              USB_TYPE_CLASS | USB_RECIP_DEVICE | USB_ENDPOINT_IN,
-                              USBRQ_HID_GET_REPORT,
-                              0, // value
-                              0, // index
-                              buff, buffSize /*8*/,
-                              REPORT_REQUEST_TIMEOUT);
+    int res = libusb_control_transfer(_deviceHandle,
+                                LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_ENDPOINT_IN,
+                                USBRQ_HID_GET_REPORT,
+                                0, // value
+                                0, // index
+                                (uchar*)buff, buffSize,
+                                REPORT_REQUEST_TIMEOUT);
     if (res != buffSize)
     {
         alog::Line logLine =
@@ -450,7 +530,8 @@ int Relay::readStates(char* buff, int buffSize)
         if (res < 0)
         {
             _usbLastErrorCode = res;
-            logLine << ". Error code: " << res << "; " << usb_strerror();
+            logLine << ". Error code: " << res
+                    << ". Detail: " << libusb_error_name(res);
         }
         ++_usbContinuousErrors;
         return -1;
@@ -513,50 +594,48 @@ bool Relay::toggleInternal(int relayNumber, bool value)
         return false;
     }
 
-    int  res;
     char buff[8];
     int  buffSize = sizeof(buff);
 
     quint8 cmd1 = 0;
     quint8 cmd2 = 0;
-    quint8 expectState = 0;
+    quint8 expectStates = 0;
 
     if (relayNumber <= 0)
     {
         if (value == true)
         {
             cmd1 = 0xFE; // Включить все реле
-            expectState = (1U << relayCount) - 1;
+            expectStates = (1U << relayCount) - 1;
         }
         else
         {
             cmd1 = 0xFC; // Выключить все реле
-            expectState = 0;
+            expectStates = 0;
         }
         relayNumber = 0;
     }
     else
     {
         memset(buff, 0, buffSize);
-        res = readStates(buff, buffSize);
-        if (res < 0)
+        int states = readStates(buff, buffSize);
+        if (states < 0)
         {
             alog::Line logLine = log_error_m << "Failed get relays current state";
             emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
             return false;
         }
-
-        expectState = quint8(res);
+        expectStates = quint8(states);
 
         if (value == true)
         {
             cmd1 = 0xFF; // Включить реле по номеру
-            expectState |= (1U << (relayNumber - 1));
+            expectStates |= (1U << (relayNumber - 1));
         }
         else
         {
             cmd1 = 0xFD; // Выключить реле по номеру
-            expectState &= ~(1U << (relayNumber - 1));
+            expectStates &= ~(1U << (relayNumber - 1));
         }
         cmd2 = quint8(relayNumber);
     }
@@ -564,14 +643,13 @@ bool Relay::toggleInternal(int relayNumber, bool value)
     memset(buff, 0, sizeof(buff));
     buff[0] = cmd1;
     buff[1] = cmd2;
-    res = usb_control_msg(_deviceHandle,
-                          USB_TYPE_CLASS | USB_RECIP_DEVICE | USB_ENDPOINT_OUT,
-                          USBRQ_HID_SET_REPORT,
-                          //USB_HID_REPORT_TYPE_FEATURE << 8 | (reportId & 0xff), // value
-                          0, // value
-                          0, // index
-                          buff, buffSize,
-                          REPORT_REQUEST_TIMEOUT);
+    int res = libusb_control_transfer(_deviceHandle,
+                                LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_ENDPOINT_OUT,
+                                USBRQ_HID_SET_REPORT,
+                                0, // value
+                                0, // index
+                                (uchar*)buff, buffSize,
+                                REPORT_REQUEST_TIMEOUT);
     if (res != buffSize)
     {
         alog::Line logLine =
@@ -579,23 +657,24 @@ bool Relay::toggleInternal(int relayNumber, bool value)
         if (res < 0)
         {
             _usbLastErrorCode = res;
-            logLine << ". Error code: " << res << "; " << usb_strerror();
+            logLine << ". Error code: " << res
+                    << ". Detail: " << libusb_error_name(res);
         }
         ++_usbContinuousErrors;
         emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
         return false;
     }
 
-    res = readStates(buff, buffSize);
-    if (res < 0)
+    int states = readStates(buff, buffSize);
+    if (states < 0)
     {
         alog::Line logLine = log_error_m << "Failed get relays current state";
         emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
         return false;
     }
-    _states = quint8(res);
+    _states = quint8(states);
 
-    if (_states != expectState)
+    if (_states != expectStates)
     {
         alog::Line logLine = log_error_m << "Failed set relays to new state";
         emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
@@ -622,10 +701,3 @@ Relay& relay()
 }
 
 } // namespace usb
-
-#undef log_error_m
-#undef log_warn_m
-#undef log_info_m
-#undef log_verbose_m
-#undef log_debug_m
-#undef log_debug2_m
