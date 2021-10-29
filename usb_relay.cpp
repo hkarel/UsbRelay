@@ -200,7 +200,7 @@ bool Relay::claimDevice()
             _usbBusNumber = libusb_get_bus_number(device);
             _usbDeviceNumber = libusb_get_device_address(device);
 
-            log_info_m << "USB pedal found on bus "
+            log_info_m << "USB device found on bus "
                        << utl::formatMessage("%03d/%03d", _usbBusNumber, _usbDeviceNumber);
 
             res = libusb_open(device, &_deviceHandle);
