@@ -159,6 +159,18 @@ bool Relay::setSerial(const QString& value)
     return true;
 }
 
+QString Relay::attachSerial() const
+{
+    QMutexLocker locker {&_threadLock}; (void) locker;
+    return _attachSerial;
+}
+
+void Relay::setAttachSerial(const QString& val)
+{
+    QMutexLocker locker {&_threadLock}; (void) locker;
+    _attachSerial = val;
+}
+
 int Relay::count() const
 {
     QMutexLocker locker {&_threadLock}; (void) locker;
@@ -307,6 +319,25 @@ bool Relay::claimDevice()
                 continue;
             }
 
+            QString serial = QString::fromLatin1(buff);
+            log_verbose_m << "USB relay serial: " << serial;
+
+            { //Block for QMutexLocker
+                QMutexLocker locker {&_threadLock}; (void) locker;
+                if (!_attachSerial.isEmpty())
+                {
+                    if (_attachSerial != serial)
+                    {
+                        log_verbose_m << log_format(
+                            "USB relay serial (%?) not match attach-serial (%?)",
+                            serial, _attachSerial);
+                        USB_DEV_CLOSE;
+                        continue;
+                    }
+                    log_verbose_m << "USB relay serial to match attach-serial";
+                }
+            }
+
             libusb_config_descriptor* config;
             res = libusb_get_active_config_descriptor(device, &config);
             if (res != LIBUSB_SUCCESS)
@@ -340,9 +371,6 @@ bool Relay::claimDevice()
                 continue;
             }
             log_verbose_m << log_format("USB interface %? claimed", intfNumber);
-
-            QString serial = QString::fromLatin1(buff);
-            log_verbose_m << "USB relay serial: " << serial;
 
             { //Block for QMutexLocker
                 QMutexLocker locker {&_threadLock}; (void) locker;

@@ -52,6 +52,12 @@ public:
     // алфавита
     bool setSerial(const QString& value);
 
+    // Устанавливает ограничение на подключение устройства по серийному номеру.
+    // Если параметр не пуст,  то  устройство  будет  подключено  только в том
+    // случае, когда его серийный номер совпадает с заданным
+    QString attachSerial() const;
+    void setAttachSerial(const QString&);
+
     // Вектор текущих состояний реле
     QVector<int> states() const;
 
@@ -104,6 +110,7 @@ private:
     int _usbDeviceNumber = {0};
 
     QVector<int> _initStates;
+    QString _attachSerial;
 
     libusb_context*       _context = {nullptr};
     libusb_device_handle* _deviceHandle = {nullptr};
