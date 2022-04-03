@@ -72,7 +72,11 @@ bool Relay::init(const QVector<int>& states)
 
 void Relay::deinit()
 {
-    libusb_exit(_context);
+    if (_context)
+    {
+        libusb_exit(_context);
+        _context = nullptr;
+    }
 }
 
 QString Relay::product() const
