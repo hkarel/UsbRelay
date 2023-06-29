@@ -75,10 +75,10 @@ signals:
     void detached();
 
     // Эмитируется при изменении состояния реле
-    void changed(int relayNumber);
+    void changed(int relayNumber, int tag);
 
     // Эмитируется если не удалось изменить состояние реле
-    void failChange(int relayNumber, const QString& errorMessage);
+    void failChange(int relayNumber, const QString& errorMessage, int tag);
 
 public slots:
     //bool toggle(const QVector<int> states);
@@ -86,8 +86,10 @@ public slots:
     // Активирует/деактивирует реле с номером relayNumber. Нумерация реле
     // начинается с единицы.  Если relayNumber > RelayCount  переключение
     // выполнено не будет. Если relayNumber <= 0  будут  переключены  все
-    // реле на плате
-    bool toggle(int relayNumber, bool value);
+    // реле на плате. Вспомогательное поле tag  используется  когда  реле
+    // управляют несколько приложений и нужно  отслежывать  какое  именно
+    // приложение выполнило переключение
+    bool toggle(int relayNumber, bool value, int tag = 0);
 
 private:
     Q_OBJECT
@@ -103,7 +105,7 @@ private:
     int readStates(char* buff, int buffSize);
 
     QVector<int> statesInternal() const;
-    bool toggleInternal(int relayNumber, bool value);
+    bool toggleInternal(int relayNumber, bool value, int tag);
 
 private:
     int _usbBusNumber = {0};

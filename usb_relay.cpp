@@ -475,7 +475,7 @@ void Relay::run()
                 QVector<int> states = statesInternal();
                 for (int i = 0; i < _count; ++i)
                     if (_initStates[i] != states[i])
-                        toggleInternal(i + 1, _initStates[i]);
+                        toggleInternal(i + 1, _initStates[i], 0);
 
                 _initStates.clear();
 
@@ -599,19 +599,19 @@ QVector<int> Relay::statesInternal() const
 //{
 //}
 
-bool Relay::toggle(int relayNumber, bool value)
+bool Relay::toggle(int relayNumber, bool value, int tag)
 {
     QMutexLocker locker {&_threadLock}; (void) locker;
-    return toggleInternal(relayNumber, value);
+    return toggleInternal(relayNumber, value, tag);
 }
 
-bool Relay::toggleInternal(int relayNumber, bool value)
+bool Relay::toggleInternal(int relayNumber, bool value, int tag)
 {
     if (!_deviceInitialized)
     {
         alog::Line logLine =
             log_error_m << "Failed toggle relay. Device not initialized";
-        emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
+        emit failChange(relayNumber, logLine.impl->buff.c_str(), tag);
         return false;
     }
 
@@ -622,7 +622,7 @@ bool Relay::toggleInternal(int relayNumber, bool value)
             "Failed toggle relay number %?. Number out of range [1..%?]",
             relayNumber, count());
 
-        emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
+        emit failChange(relayNumber, logLine.impl->buff.c_str(), tag);
         return false;
     }
 
@@ -654,7 +654,7 @@ bool Relay::toggleInternal(int relayNumber, bool value)
         if (states < 0)
         {
             alog::Line logLine = log_error_m << "Failed get relays current state";
-            emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
+            emit failChange(relayNumber, logLine.impl->buff.c_str(), tag);
             return false;
         }
         expectStates = quint8(states);
@@ -693,7 +693,7 @@ bool Relay::toggleInternal(int relayNumber, bool value)
                     << ". Detail: " << libusb_error_name(res);
         }
         ++_usbContinuousErrors;
-        emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
+        emit failChange(relayNumber, logLine.impl->buff.c_str(), tag);
         return false;
     }
 
@@ -701,7 +701,7 @@ bool Relay::toggleInternal(int relayNumber, bool value)
     if (states < 0)
     {
         alog::Line logLine = log_error_m << "Failed get relays current state";
-        emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
+        emit failChange(relayNumber, logLine.impl->buff.c_str(), tag);
         return false;
     }
     _states = quint8(states);
@@ -709,7 +709,7 @@ bool Relay::toggleInternal(int relayNumber, bool value)
     if (_states != expectStates)
     {
         alog::Line logLine = log_error_m << "Failed set relays to new state";
-        emit failChange(relayNumber, QString::fromStdString(logLine.impl->buff));
+        emit failChange(relayNumber, logLine.impl->buff.c_str(), tag);
         return false;
     }
 
@@ -720,7 +720,7 @@ bool Relay::toggleInternal(int relayNumber, bool value)
         log_verbose_m << log_format(
             "USB relay %? turn %?", relayNumber, (value) ? "ON" : "OFF");
 
-    emit changed(relayNumber);
+    emit changed(relayNumber, tag);
 
     _usbContinuousErrors = 0;
     _usbLastErrorCode = 0;
