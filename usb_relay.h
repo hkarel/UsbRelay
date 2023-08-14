@@ -128,7 +128,7 @@ private:
     mutable QMutex _threadLock;
     mutable QWaitCondition _threadCond;
 
-    template<typename T, int> friend T& ::safe_singleton();
+    template<typename T, int> friend T& safe::singleton();
 };
 
 Relay& relay();

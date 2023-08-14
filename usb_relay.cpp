@@ -729,7 +729,7 @@ bool Relay::toggleInternal(int relayNumber, bool value, int tag)
 
 Relay& relay()
 {
-    return ::safe_singleton<Relay>();
+    return safe::singleton<Relay>();
 }
 
 } // namespace usb
